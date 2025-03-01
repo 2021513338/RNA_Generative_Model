@@ -1,117 +1,129 @@
+import os
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import pandas as pd
-# 定义超参数
-INPUT_DIM = len(EN.vocab.stoi)  # 英文词汇表大小
-OUTPUT_DIM = len(DE.vocab.stoi)  # 德文词汇表大小
-ENC_EMB_DIM = 256  # 编码器嵌入维度
-DEC_EMB_DIM = 256  # 解码器嵌入维度
-HID_DIM = 512  # 隐藏层维度
-N_LAYERS = 3  # 层数
-ENC_DROPOUT = 0.5  # 编码器dropout
-DEC_DROPOUT = 0.5  # 解码器dropout
-NUM_EPOCHS = 10 #迭代次数
+from torch.utils.data import Dataset
+import math
+import numpy as np
+from gensim.models import Word2Vec
 
-# 定义模型
-class Transformer(nn.Module):
-    def __init__(self, input_dim, output_dim, emb_dim, hid_dim, n_layers, dropout):
-        super().__init__()
-        self.encoder = nn.Embedding(input_dim, emb_dim)
-        self.decoder = nn.Embedding(output_dim, emb_dim)
-        self.enc_layer = nn.TransformerEncoderLayer(d_model=hid_dim, nhead=8)
-        self.dec_layer = nn.TransformerDecoderLayer(d_model=hid_dim, nhead=8)
-        self.transformer_encoder = nn.TransformerEncoder(self.enc_layer, num_layers=n_layers)
-        self.transformer_decoder = nn.TransformerDecoder(self.dec_layer, num_layers=n_layers)
-        self.fc_out = nn.Linear(hid_dim, output_dim)
+class AminoAcidDataset(Dataset):
+    def __init__(self, amino_acid_seqs, labels, word_vectors_path):
+        self.amino_acid_seqs = amino_acid_seqs
+        self.labels = labels
+        self.word_vectors_path = word_vectors_path
+        self.word_vectors = self.load_word_vectors()
 
-    def forward(self, src, trg):
-        src_emb = self.encoder(src)
-        trg_emb = self.decoder(trg)
-        output = self.transformer_encoder(src_emb)
-        output = self.transformer_decoder(output, trg_emb)
-        output = self.fc_out(output)
+    def load_word_vectors(self):
+        """
+        加载预训练的词向量模型。
+        如果模型不存在，则训练并保存。
+        """
+        if os.path.exists(self.word_vectors_path):
+            print(f"Loading pre-trained word vectors from {self.word_vectors_path}...")
+            return Word2Vec.load(self.word_vectors_path).wv
+        else:
+            print(f"No pre-trained word vectors found. Training new model...")
+            w2v_model = Word2Vec(sentences=self.amino_acid_seqs, vector_size=128, window=5, min_count=1, workers=4)
+            w2v_model.save(self.word_vectors_path)
+            print(f"Model saved to {self.word_vectors_path}.")
+            return w2v_model.wv
+
+    def __len__(self):
+        return len(self.amino_acid_seqs)
+
+    def __getitem__(self, idx):
+        seq = self.amino_acid_seqs[idx]
+        label = self.labels[idx]
+
+        # 不再进行填充，保留原始序列长度
+        seq_vec = np.array([self.word_vectors[word] for word in seq])
+        return {
+            'seq': torch.tensor(seq_vec, dtype=torch.float),
+            'label': torch.tensor(label, dtype=torch.long),
+            'seq_length': len(seq)  # 返回序列的实际长度
+        }
+
+
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)  # 形状为 (max_len, 1, d_model)
+        self.register_buffer('pe', pe)
+        print(f"PositionalEncoding pe.shape: {self.pe.shape}")
+
+    def forward(self, x):
+        # 确保位置编码的长度与输入张量的序列长度一致
+        print(f"PositionalEncoding input x.shape: {x.shape}")  # 输入张量形状
+        pe_slice = self.pe[:x.size(0), :]
+        print(f"PositionalEncoding pe_slice.shape: {pe_slice.shape}")  # 切片后的形状
+        return x + pe_slice  # 添加位置编码
+
+
+class TransformerModel(nn.Module):
+    """
+    Transformer 模型，包含编码器和解码器。
+    """
+    def __init__(self, tgt_vocab_size, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, max_seq_length, trans_dropout):
+        super(TransformerModel, self).__init__()
+        self.d_model = d_model
+
+        # 编码器
+        self.src_pos_encoding = PositionalEncoding(d_model, max_len=max_seq_length)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=trans_dropout)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+
+        # 解码器
+        self.tgt_embedding = nn.Embedding(tgt_vocab_size, d_model, padding_idx=0)  # 添加解码器的嵌入层
+        self.tgt_pos_encoding = PositionalEncoding(d_model, max_len=max_seq_length)
+        decoder_layer = nn.TransformerDecoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=trans_dropout)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
+
+        # 输出层
+        self.out = nn.Linear(d_model, tgt_vocab_size)
+
+    def forward(self, src, tgt, tgt_mask=None, src_padding_mask=None, tgt_padding_mask=None):
+
+        # 打印输入张量形状
+        print(f"src.shape: {src.shape}")  # 编码器输入形状 (seq_length, batch_size, d_model)
+        print(f"tgt.shape: {tgt.shape}")  # 解码器输入形状 (tgt_seq_length, batch_size, d_model)
+        print(f"tgt max value: {torch.max(tgt)}, tgt min value: {torch.min(tgt)}")
+        # 编码器
+        src_emb = src * math.sqrt(self.d_model)  # 直接使用输入的词向量
+        src_emb = self.src_pos_encoding(src_emb)
+        print(f"src_emb.shape after positional encoding: {src_emb.shape}")
+        encoder_output = self.encoder(src_emb, src_key_padding_mask=src_padding_mask)
+        print(f"encoder_output.shape: {encoder_output.shape}")  # 应该是 (seq_length, batch_size, d_model)
+
+        # 解码器
+        tgt_emb = self.tgt_embedding(tgt) * math.sqrt(self.d_model)
+        tgt_emb = self.tgt_pos_encoding(tgt_emb)
+        print(f"tgt_emb.shape after positional encoding: {tgt_emb.shape}")
+
+        decoder_output = self.decoder(tgt_emb, encoder_output, tgt_mask=tgt_mask,
+                                      memory_key_padding_mask=src_padding_mask,
+                                      tgt_key_padding_mask=tgt_padding_mask)
+        print(f"decoder_output.shape: {decoder_output.shape}")  # 应该是 (tgt_seq_length, batch_size, d_model)
+        output = self.out(decoder_output)
+        print(f"output.shape: {output.shape}")  # 应该是 (tgt_seq_length, batch_size, tgt_vocab_size)
         return output
 
-def train(model, iterator, optimizer, criterion, clip):
-    model.train()
-    epoch_loss = 0
+    def predict(self, src, src_padding_mask=None, tgt_padding_mask=None):
+        # 预测时，解码器的输入需要逐步生成
+        batch_size = src.size(1)
+        tgt = torch.zeros(1, batch_size, dtype=torch.long)  # 假设 0 是起始符
 
-    for i, batch in enumerate(iterator):
-        src = batch.src
-        trg = batch.trg
+        for i in range(src.size(0)):
+            current_len = tgt.size(0)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(current_len)
+            output = self.forward(src, tgt, tgt_mask, src_padding_mask, tgt_padding_mask)
+            next_token = output.argmax(dim=2)[-1, :].unsqueeze(0)  # 选择最后一步的输出
+            tgt = torch.cat([tgt, next_token], dim=0)
 
-        optimizer.zero_grad()
+        return tgt[1:, :]  # 去掉起始符
 
-        output = model(src, trg[:, :-1])
-
-        output_dim = output.shape[-1]
-
-        output = output.contiguous().view(-1, output_dim)
-        trg = trg[:, 1:].contiguous().view(-1)
-
-        loss = criterion(output, trg)
-
-        loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
-
-        optimizer.step()
-
-        epoch_loss += loss.item()
-
-    return epoch_loss / len(iterator)
-
-
-def evaluate(model, iterator, criterion):
-    model.eval()
-    epoch_loss = 0
-
-    with torch.no_grad():
-        for i, batch in enumerate(iterator):
-            src = batch.src
-            trg = batch.trg
-
-            output = model(src, trg[:, :-1])
-
-            output_dim = output.shape[-1]
-
-            output = output.contiguous().view(-1, output_dim)
-            trg = trg[:, 1:].contiguous().view(-1)
-
-            loss = criterion(output, trg)
-
-            epoch_loss += loss.item()
-
-    return epoch_loss / len(iterator)
-
-def train_save_model(train_iterator, valid_iterator, clip, num_epochs, save_path):
-    best_valid_loss = float('inf')
-    model = Transformer(INPUT_DIM, OUTPUT_DIM, ENC_EMB_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters())
-
-    for epoch in range(num_epochs):
-        train_loss = train(model, train_iterator, optimizer, criterion, clip)
-        valid_loss = evaluate(model, valid_iterator, criterion)
-
-        # 打印当前周期的信息
-        print(f'Epoch: {epoch + 1:02}, Train Loss: {train_loss:.3f}, Val. Loss: {valid_loss:.3f}')
-
-        # 保存具有最低验证损失的模型
-        if valid_loss < best_valid_loss:
-            best_valid_loss = valid_loss
-            torch.save(model.state_dict(), save_path)
-            print(f"New best model saved at Epoch {epoch + 1}")
-
-def load_from_csv(X_filename='X.csv', y_filename='y.csv'):
-    X = pd.read_csv(X_filename, header=None).values
-    y = pd.read_csv(y_filename, header=None).values.ravel()
-    return X, y
-
-if __name__ == "__main__":
-    '''
-    X, y = make_classification(n_samples=100, n_features=303, n_classes=2, random_state=42)
-
-    '''
-    RNA_seq, Protein_seq = load_from_csv('RNA_seq.csv', 'Protein_seq.csv')
