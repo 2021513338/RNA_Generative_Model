@@ -27,21 +27,25 @@ def collate_fn(batch):
     }
 
 
-def train_RNN_CRF(amino_acid_seqs, labels, word_vectors_path, model_save_path, k_folds=5):
-    # 数据加载器
-    dataset = AminoAcidDataset(amino_acid_seqs, labels, word_vectors_path)
-    data_loader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
+def train_RNN_CRF(amino_acid_seqs, labels, hidden_dim, num_epochs, num_layers):
 
     # 模型参数
+    k_folds = 10
     tag_size = 62
-    input_dim = 100  # 词向量维度
-    hidden_dim = 128  # RNN隐藏层维度
+    input_dim = 128  # 词向量维度
+    batch_size = 64
     output_dim = tag_size
+    model_save_path = "best_RNN_CRF.pth"
+    word_vectors_path = "protein_word_vec.model"
+    result_save_path = f"result/RNN_nl_{num_layers}_hd_{hidden_dim}_ep_{num_epochs}.txt"
 
     # 初始化 K 折交叉验证
     kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
     fold_accuracies = []
     fold_auc_scores = []
+
+    result_file = open(result_save_path, "w")
+    result_file.write("Fold\tACC\tAUC\n")  # 写入表头
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(amino_acid_seqs)):
         print(f"Training fold {fold + 1}/{k_folds}")
@@ -54,18 +58,17 @@ def train_RNN_CRF(amino_acid_seqs, labels, word_vectors_path, model_save_path, k
 
         # 创建训练集和验证集的数据加载器
         train_dataset = AminoAcidDataset(train_seqs, train_labels, word_vectors_path)
-        train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
+        train_loader = DataLoader(train_dataset, batch_size, shuffle=True, collate_fn=collate_fn)
         val_dataset = AminoAcidDataset(val_seqs, val_labels, word_vectors_path)
-        val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size, shuffle=False, collate_fn=collate_fn)
 
         # 初始化模型、优化器和学习率调度器
-        model = BiGRU_CRF(input_dim, hidden_dim, tag_size, output_dim)
+        model = BiGRU_CRF(input_dim, hidden_dim, tag_size, output_dim, num_layers)
         optimizer = optim.Adam(model.parameters(), lr=0.001)
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
         best_loss = float('inf')
 
         # 训练模型
-        num_epochs = 10
         for epoch in range(num_epochs):
             model.train()
             running_loss = 0.0
@@ -119,11 +122,15 @@ def train_RNN_CRF(amino_acid_seqs, labels, word_vectors_path, model_save_path, k
         fold_accuracies.append(acc)
         fold_auc_scores.append(auc)
         print(f"Fold {fold + 1} - ACC: {acc:.4f}, AUC: {auc:.4f}")
+        result_file.write(f"{fold + 1}\t{acc:.4f}\t{auc:.4f}\n")
 
     # 计算平均 ACC 和 AUC
     avg_acc = np.mean(fold_accuracies)
     avg_auc = np.mean(fold_auc_scores)
     print(f"Average ACC: {avg_acc:.4f}, Average AUC: {avg_auc:.4f}")
     print(f'Training complete. Best model saved at: {model_save_path}')
+    result_file.write(f"Average\t{avg_acc:.4f}\t{avg_auc:.4f}\n")
+
+    result_file.close()
 
 

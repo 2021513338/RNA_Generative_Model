@@ -66,9 +66,6 @@ class PositionalEncoding(nn.Module):
 
 
 class TransformerModel(nn.Module):
-    """
-    Transformer 模型，包含编码器和解码器。
-    """
     def __init__(self, tgt_vocab_size, d_model, nhead, num_encoder_layers, num_decoder_layers, dim_feedforward, max_seq_length, trans_dropout):
         super(TransformerModel, self).__init__()
         self.d_model = d_model
@@ -97,6 +94,7 @@ class TransformerModel(nn.Module):
         src_emb = src * math.sqrt(self.d_model)  # 直接使用输入的词向量
         src_emb = self.src_pos_encoding(src_emb)
         print(f"src_emb.shape after positional encoding: {src_emb.shape}")
+        print(src_padding_mask.dtype)
         encoder_output = self.encoder(src_emb, src_key_padding_mask=src_padding_mask)
         print(f"encoder_output.shape: {encoder_output.shape}")  # 应该是 (seq_length, batch_size, d_model)
 

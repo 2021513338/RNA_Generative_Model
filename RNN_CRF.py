@@ -25,7 +25,7 @@ class AminoAcidDataset(Dataset):
             return Word2Vec.load(self.word_vectors_path).wv
         else:
             print(f"No pre-trained word vectors found. Training new model...")
-            w2v_model = Word2Vec(sentences=self.amino_acid_seqs, vector_size=100, window=5, min_count=1, workers=4)
+            w2v_model = Word2Vec(sentences=self.amino_acid_seqs, vector_size=128, window=5, min_count=1, workers=4)
             w2v_model.save(self.word_vectors_path)
             print(f"Model saved to {self.word_vectors_path}.")
             return w2v_model.wv
@@ -47,10 +47,10 @@ class AminoAcidDataset(Dataset):
 
 # BiLSTM-CRF模型
 class BiGRU_CRF(nn.Module):
-    def __init__(self, input_dim, hidden_dim, tag_size, output_dim):
+    def __init__(self, input_dim, hidden_dim, tag_size, output_dim, num_layers):
         super(BiGRU_CRF, self).__init__()
         self.hidden_dim = hidden_dim
-        self.gru = nn.GRU(input_dim, hidden_dim // 2, num_layers=1, bidirectional=True)
+        self.gru = nn.GRU(input_dim, hidden_dim // 2, num_layers, bidirectional=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
         self.crf = CRF(tag_size, batch_first=True)
 
