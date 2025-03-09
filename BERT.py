@@ -31,9 +31,14 @@ class BERT(nn.Module):
             nn.Linear(hidden_size, self.vocab_size),  # Output layer to vocab size
         )
         # 分类输出层
-        self.classifier = nn.Linear(hidden_size, num_classes)
+        self.classifier = nn.Linear(word_vec_size, num_classes)
         #回归输出层
-        self.regression_head = nn.Linear(hidden_size, 1)
+        self.regression_head = nn.Sequential(
+            nn.LayerNorm(word_vec_size),
+            nn.Linear(word_vec_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1)
+        )
 
     def init_weights(self, module):
         """ 初始化权重 """
@@ -42,7 +47,6 @@ class BERT(nn.Module):
             if isinstance(module, nn.Linear) and module.bias is not None:
                 module.bias.data.zero_()
             else:
-                # 或者使用Kaiming初始化
                 init.xavier_uniform_(module.weight)
                 # init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
         elif isinstance(module, nn.LayerNorm):
@@ -51,7 +55,7 @@ class BERT(nn.Module):
 
 
     def forward(self, word_embeds, segment_ids, masked_positions=None, task_type="mlm"):
-        print(f"Input word_embeds shape: {word_embeds.shape}")  # (batch_size, seq_len, word_vec_size)
+        # (batch_size, seq_len, word_vec_size)
         # 位置编码
         position_ids = torch.arange(
             word_embeds.size(1),
@@ -59,20 +63,19 @@ class BERT(nn.Module):
             device=word_embeds.device
         ).unsqueeze(0).expand(word_embeds.size(0), -1)
         position_embeds = self.position_embeddings(position_ids)  # (1, seq_len, hidden_size)
-        print(f"Position embeddings shape: {position_embeds.shape}")
+
         # 分段嵌入
         segment_embeds = self.segment_embeddings(segment_ids)  # (batch_size, seq_len, hidden_size)
-        print(f"Segment embeddings shape: {segment_embeds.shape}")
+
         # 组合嵌入
         embeddings = word_embeds + position_embeds + segment_embeds
-        print(f"Combined embeddings shape: {embeddings.shape}")  # (batch_size, seq_len, word_vec_size)
+        # (batch_size, seq_len, word_vec_size)
         embeddings = self.layer_norm(embeddings)
         embeddings = self.dropout(embeddings)
-        print(f"Embeddings after layer norm and dropout: {embeddings.shape}")
+
         # Transformer 编码
         padding_mask = (word_embeds == 0).all(dim=-1)
         transformer_output = self.transformer_encoder(embeddings, src_key_padding_mask=padding_mask)  # (seq_len, batch_size, hidden_size)
-        print(f"Transformer output shape after permute: {transformer_output.shape}")
 
         # 根据任务类型返回输出
         if task_type == "mlm":
@@ -97,9 +100,7 @@ class BERT(nn.Module):
                 raise ValueError("num_classes must be specified for classification task")
             # 使用 [CLS] 位置的输出进行分类
             cls_output = transformer_output[:, 0, :]  # (batch_size, hidden_size)
-            print(f"CLS output shape: {cls_output.shape}")
             logits = self.classifier(cls_output)  # (batch_size, num_classes)
-            print(f"Classification logits shape: {logits.shape}")
             return logits
 
         elif task_type == "regression":
@@ -120,7 +121,10 @@ class BERTDataset(Dataset):
         self.CDS_sequences = CDS_sequences
         self.Five_UTR_sequences = Five_UTR_sequences
         self.Three_UTR_sequences = Three_UTR_sequences
-        self.sequences = Five_UTR_sequences + CDS_sequences + Three_UTR_sequences
+        self.sequences = [
+            five + cds + three
+            for five, cds, three in zip(Five_UTR_sequences, CDS_sequences, Three_UTR_sequences)
+        ]
         self.word_vectors_path = word_vectors_path
         self.mask_prob = mask_prob
         self.num_segments = num_segments
@@ -161,14 +165,15 @@ class BERTDataset(Dataset):
         )
 
         # 确定分段ID（无需填充）
-        if idx < len(self.Five_UTR_sequences):
-            segment_id = 1  # Five UTR
-        elif idx < len(self.CDS_sequences) + len(self.Five_UTR_sequences):
-            segment_id = 2  # CDS
-        else:
-            segment_id = 3  # Three UTR
+        five_len = len(self.Five_UTR_sequences[idx])  # 假设Five_UTR_sequences存储原始字符串
+        cds_len = len(self.CDS_sequences[idx])
+        three_len = len(self.Three_UTR_sequences[idx])
 
-        segment_ids = [segment_id] * len(seq_vectors)  # 保持原始长度
+        # 生成分段ID：Five UTR=0, CDS=1, Three UTR=2
+        segment_ids = []
+        segment_ids += [1] * (five_len - 1)  # Five UTR的k-mer数量
+        segment_ids += [2] * (cds_len)  # CDS的k-mer数量
+        segment_ids += [3] * (three_len - 1)  # Three UTR的k-mer数量
 
         # 直接返回未填充的数据
         if self.task_type == "mlm":
@@ -193,7 +198,7 @@ class BERTDataset(Dataset):
             # 为分类任务准备的输入是完整的词向量和 labels
             return {
                 "word_embeds": seq_vectors,
-                "segment_ids": segment_ids,
+                "segment_ids": torch.tensor(segment_ids, dtype=torch.long),
                 "label": torch.tensor(self.labels[idx], dtype=torch.long),
             }
 
@@ -201,8 +206,8 @@ class BERTDataset(Dataset):
             # 为回归任务准备的输入是完整的词向量和连续值标签
             return {
                 "word_embeds": seq_vectors,
-                "segment_ids": segment_ids,
-                "label": torch.tensor(self.labels[idx], dtype=torch.float32),  # 连续值标签
+                "segment_ids": torch.tensor(segment_ids, dtype=torch.long),
+                "label": torch.tensor(self.labels[idx], dtype=torch.float32)  # 连续值标签
             }
 
         else:

@@ -126,7 +126,7 @@ def train_bert_mlm(CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, k, wo
 
 def train_regression( CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, labels, k, word_vectors_path, epochs):
     # 初始化 K 折交叉验证
-    batch_size = 32
+    batch_size = 8
     model_save_path = "best_bert_mlm.pth"
     reg_model_path = "best_bert_reg.pth"
     k_folds = 10
@@ -178,11 +178,11 @@ def train_regression( CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, la
             for batch in train_loader:
                 word_embeds = batch['word_embeds'].to(device)
                 segment_ids = batch['segment_ids'].to(device)
-                labels = batch['label'].to(device)
+                train_batch_labels = batch['label'].to(device)
 
                 optimizer.zero_grad()
                 outputs = model(word_embeds, segment_ids, task_type='regression')
-                loss = criterion(outputs.squeeze(), labels)
+                loss = criterion(outputs.squeeze(), train_batch_labels)
                 loss.backward()
                 optimizer.step()
 
@@ -197,7 +197,7 @@ def train_regression( CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, la
                 torch.save(model.state_dict(), reg_model_path)
                 print(f'New best model saved with loss: {avg_loss:.4f}')
 
-# 在每个 fold 结束后，使用最佳模型计算验证集的 R²
+        # 在每个 fold 结束后，使用最佳模型计算验证集的 R²
         model.load_state_dict(torch.load(reg_model_path))
         model.eval()
         all_preds = []
@@ -206,11 +206,11 @@ def train_regression( CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, la
             for batch in val_loader:
                 word_embeds = batch['word_embeds'].to(device)
                 segment_ids = batch['segment_ids'].to(device)
-                labels = batch['label'].to(device)
+                val_batch_labels = batch['label'].to(device)
 
                 outputs = model(word_embeds, segment_ids, task_type='regression')
                 all_preds.extend(outputs.cpu().numpy().flatten())
-                all_labels.extend(labels.cpu().numpy().flatten())
+                all_labels.extend(val_batch_labels.cpu().numpy().flatten())
 
         r2 = r2_score(all_labels, all_preds)
         print(f"Fold {fold + 1} Validation R^2: {r2:.4f}")
