@@ -1,22 +1,23 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.model_selection import KFold
 from GPT import GPT, UTRDataset
 from sklearn.metrics import accuracy_score
-
+import math
 
 def collate_fn(batch):
-    input_ids = [item["input_ids"] for item in batch]  # 提取所有样本的input_ids
-    labels = [item["labels"] for item in batch]  # 提取所有样本的labels
-    padding_masks = [item["padding_mask"] for item in batch]  # 提取所有样本的padding_mask
+    input_ids = [item["input_ids"] for item in batch]
+    labels = [item["labels"] for item in batch]
+    padding_masks = [item["padding_mask"] for item in batch]
 
-    # 使用pad_sequence对序列进行填充，确保批次内所有序列长度一致
-    input_ids_padded = torch.nn.utils.rnn.pad_sequence(input_ids, batch_first=True, padding_value=0)
-    labels_padded = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=0)  #
-    padding_masks_padded = torch.nn.utils.rnn.pad_sequence(padding_masks, batch_first=True, padding_value=1)
+    # 填充到批次内最大长度
+    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
+    labels_padded = pad_sequence(labels, batch_first=True, padding_value=-1)
+    padding_masks_padded = pad_sequence(padding_masks, batch_first=True, padding_value=1)
 
     return {
         "input_ids": input_ids_padded,
@@ -44,10 +45,9 @@ def train_GPT(sequences, word_vectors_path, model_save_path, num_epochs):
         train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=collate_fn)
         val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, collate_fn=collate_fn)
 
-        vocab_size = len(train_dataset.word_vectors.key_to_index) + 1
-        max_len = 200
-        model = GPT(vocab_size=vocab_size, max_len=max_len).to(device)
-        criterion = nn.CrossEntropyLoss(ignore_index=0)  # 忽略填充位置
+        vocab_size = len(train_dataset.word_vectors.key_to_index)
+        model = GPT(vocab_size=vocab_size).to(device)
+        criterion = nn.CrossEntropyLoss(ignore_index=-1)  # 忽略填充位置
         optimizer = optim.Adam(model.parameters(), lr=1e-3)
         scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, verbose=True)
         best_loss = float('inf')
@@ -89,6 +89,7 @@ def train_GPT(sequences, word_vectors_path, model_save_path, num_epochs):
         model.load_state_dict(torch.load(model_save_path))
         model.eval()
         val_loss = 0.0
+        total_tokens = 0
         all_preds = []
         all_targets = []
 
@@ -106,11 +107,11 @@ def train_GPT(sequences, word_vectors_path, model_save_path, num_epochs):
                 # 前向传播
                 logits = model(inputs, padding_mask=padding_mask[:, :-1])
                 loss = criterion(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-                val_loss += loss.item()
+                val_loss += loss.item() * targets.numel()  # 累加总损失（考虑批量）
+                total_tokens += mask.sum().item()
 
                 # 获取预测结果并过滤填充位置
                 preds = logits.argmax(dim=-1)  # (batch_size, seq_len)
-
                 preds_np = preds.cpu().numpy().flatten()
                 targets_np = targets.cpu().numpy().flatten()
                 mask_np = mask.cpu().numpy().flatten()
@@ -124,7 +125,8 @@ def train_GPT(sequences, word_vectors_path, model_save_path, num_epochs):
 
 
         val_accuracy = accuracy_score(all_targets, all_preds)
-        avg_val_loss = val_loss / len(val_loader)
-        print(f"Validation Loss: {avg_val_loss:.4f}, Accuracy: {val_accuracy:.4f}")
+        avg_val_loss = val_loss / total_tokens
+        perplexity = math.exp(avg_val_loss)
+        print(f"Validation Loss: {avg_val_loss:.4f}, Accuracy: {val_accuracy:.4f}, Perplexity: {perplexity:.4f}")
 
 
