@@ -17,21 +17,38 @@ class GRUModel(nn.Module):
 
         # 分段嵌入
         self.segment_embed = nn.Embedding(3, 16)
-
+        # 正则化和归一化可以引入
         # GRU编码器
         self.gru = nn.GRU(
             input_size=word_vec_size + 16,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            bidirectional=bidirectional
+            bidirectional=bidirectional,
+            dropout=0.1
         )
 
-        # 分类输出层
+        # 注意力机制可以改进
         factor = 2 if bidirectional else 1
-        self.attention = nn.Linear(hidden_size * factor, 1)
+        self.attention = nn.Sequential(  # 改为多层注意力
+            nn.Linear(hidden_size * factor, hidden_size // 2),
+            nn.Tanh(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size // 2, 1)
+        )
+        # 分类输出层
+        # 分类器可以加强
         if num_classes > 0:
-            self.classifier = nn.Linear(hidden_size * factor, num_classes)
+            self.classifier = nn.Sequential(
+                nn.Linear(hidden_size * factor, hidden_size),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(hidden_size, hidden_size // 2),
+                nn.ReLU(),
+                nn.LayerNorm(hidden_size // 2),
+                nn.Dropout(0.1),
+                nn.Linear(hidden_size // 2, num_classes)
+            )
 
         # 初始化权重
         self.init_weights()
@@ -48,10 +65,12 @@ class GRUModel(nn.Module):
         # 初始化分段嵌入 (新增)
         init.xavier_uniform_(self.segment_embed.weight)
 
-        # 初始化注意力层 (新增)
-        init.xavier_uniform_(self.attention.weight)
-        if self.attention.bias is not None:
-            init.zeros_(self.attention.bias)
+        # 初始化注意力层（多层）
+        if hasattr(self, 'attention') and isinstance(self.attention, nn.Module):
+            if isinstance(self.attention, nn.Linear):
+                init.xavier_uniform_(self.attention.weight)
+                if self.attention.bias is not None:
+                    init.zeros_(self.attention.bias)
 
         # 初始化分类器
         if hasattr(self, 'classifier') and isinstance(self.classifier, nn.Module):
