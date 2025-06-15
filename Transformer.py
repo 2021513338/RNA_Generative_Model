@@ -34,8 +34,6 @@ class AminoAcidDataset(Dataset):
     def __getitem__(self, idx):
         seq = self.amino_acid_seqs[idx]
         label = self.labels[idx]
-
-        # 不再进行填充，保留原始序列长度
         seq_vec = np.array([self.word_vectors[word] for word in seq])
         return {
             'seq': torch.tensor(seq_vec, dtype=torch.float),

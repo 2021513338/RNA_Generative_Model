@@ -1,28 +1,30 @@
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+import pandas as pd
 from Autoencoder import Autoencoder  # 导入Autoencoder类
+from Sequence_Convert import convert_cds_to_numbers
 
-def load_model(model_path, input_size, hidden_size, output_size):
-    model = Autoencoder(input_size, hidden_size, output_size)
+
+def get_mRNA_low_dim(rna_seq, model_path):
+    input_size = len(rna_seq)  # 假设所有序列长度相同
+    encoding_dim = 64  # 低维表示的维度
+    hidden_size = 256
+    embedding_dim = 32
+    model = Autoencoder(input_size, encoding_dim, hidden_size, embedding_dim)
     model.load_state_dict(torch.load(model_path))
     model.eval()
-    return model
 
-def get_low_dim_representation(model, sequence):
-    model.eval()
-    with torch.no_grad():
-        return model.encoder(torch.tensor(sequence).float())
+    sequence_tensor = torch.tensor(rna_seq, dtype=torch.long).unsqueeze(0)
+    # 使用模型的encoder部分获取低维表示
+    with torch.no_grad():  # 不需要计算梯度
+        #low_dim_output = model(sequence_tensor)
+        low_dim_output = model.encode(sequence_tensor)
+    return low_dim_output
 
-def get_mRNA_low_dim(rna_seq):
-    input_size = len(rna_seq)
-    hidden_size = 128
-    output_size = 32
-    # 加载模型
-    model_path = './model.pth'  # .pth文件的路径
-    model = load_model(model_path, input_size, hidden_size, output_size)
-
-    # 获取低维表示
-    low_dim_representation = get_low_dim_representation(model, rna_seq)
-    print(low_dim_representation)
+file_path = 'trimmed_sequence.csv'
+df = pd.read_csv(file_path)
+sequence = df['CDS_Sequence'].sample(n=1).iloc[0]
+print(sequence)
+rna_sequences = convert_cds_to_numbers(sequence)
+low_dim_output = get_mRNA_low_dim(rna_sequences, 'best_autoencoder.pth')
+print("Low-dimensional representation:")
+print(low_dim_output.numpy())

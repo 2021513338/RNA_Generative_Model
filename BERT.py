@@ -8,10 +8,13 @@ import numpy as np
 
 
 class BERT(nn.Module):
-    def __init__(self, word2vec_model, word_vec_size=128, hidden_size=768, num_layers=12, num_heads=8, max_seq_len=16384, num_segments=4,
-                 num_classes=2):
+    def __init__(self, word2vec_model, word_vec_size=128, hidden_size=768, num_layers=12, num_heads=8,
+                 max_seq_len=16384, num_segments=4, num_classes=2):
         super(BERT, self).__init__()
-
+        # CLS头嵌入
+        self.cls_embedding = nn.Parameter(torch.randn(1, 1, word_vec_size))
+        nn.init.normal_(self.cls_embedding, mean=0, std=0.02)
+        # 位置嵌入
         self.position_embeddings = nn.Embedding(max_seq_len, word_vec_size)
         # 分段嵌入（Segment Embeddings）
         self.segment_embeddings = nn.Embedding(num_segments, word_vec_size)
@@ -31,14 +34,24 @@ class BERT(nn.Module):
             nn.Linear(hidden_size, self.vocab_size),  # Output layer to vocab size
         )
         # 分类输出层
-        self.classifier = nn.Linear(word_vec_size, num_classes)
-        #回归输出层
+        self.num_classes = num_classes
+        self.classifier = nn.Sequential(
+            nn.Linear(word_vec_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, num_classes)
+        )
+        # 回归输出层
         self.regression_head = nn.Sequential(
             nn.LayerNorm(word_vec_size),
             nn.Linear(word_vec_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, 1)
         )
+        self.apply(self.init_weights)
 
     def init_weights(self, module):
         """ 初始化权重 """
@@ -53,18 +66,24 @@ class BERT(nn.Module):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
-
     def forward(self, word_embeds, segment_ids, masked_positions=None, task_type="mlm"):
         # (batch_size, seq_len, word_vec_size)
+        # 添加[CLS]标记到输入序列
+        batch_size = word_embeds.size(0)
+        cls_embeds = self.cls_embedding.expand(batch_size, 1, -1)
+        word_embeds = torch.cat([cls_embeds, word_embeds], dim=1)
+
         # 位置编码
         position_ids = torch.arange(
             word_embeds.size(1),
             dtype=torch.long,
             device=word_embeds.device
-        ).unsqueeze(0).expand(word_embeds.size(0), -1)
+        ).unsqueeze(0).expand(batch_size, -1)
         position_embeds = self.position_embeddings(position_ids)  # (1, seq_len, hidden_size)
 
         # 分段嵌入
+        cls_segments = torch.zeros(batch_size, 1, dtype=torch.long, device=segment_ids.device)
+        segment_ids = torch.cat([cls_segments, segment_ids], dim=1)
         segment_embeds = self.segment_embeddings(segment_ids)  # (batch_size, seq_len, hidden_size)
 
         # 组合嵌入
@@ -75,7 +94,8 @@ class BERT(nn.Module):
 
         # Transformer 编码
         padding_mask = (word_embeds == 0).all(dim=-1)
-        transformer_output = self.transformer_encoder(embeddings, src_key_padding_mask=padding_mask)  # (seq_len, batch_size, hidden_size)
+        transformer_output = self.transformer_encoder(embeddings, src_key_padding_mask=padding_mask)
+        # (seq_len, batch_size, hidden_size)
 
         # 根据任务类型返回输出
         if task_type == "mlm":
@@ -114,8 +134,8 @@ class BERT(nn.Module):
 
 
 class BERTDataset(Dataset):
-    def __init__(self, CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, k, word_vectors_path, mask_prob=0.15, num_segments=2, task_type="mlm",
-                 labels=None):
+    def __init__(self, CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, k, word_vectors_path, mask_prob=0.15,
+                 num_segments=2, task_type="mlm", labels=None):
 
         self.k = k
         self.CDS_sequences = CDS_sequences
@@ -148,6 +168,7 @@ class BERTDataset(Dataset):
             w2v_model.save(self.word_vectors_path)
             print(f"Model saved to {self.word_vectors_path}.")
             return w2v_model.wv
+
     def __len__(self):
         return len(self.sequences)
 
@@ -155,7 +176,6 @@ class BERTDataset(Dataset):
     def __getitem__(self, idx):
         seq = self.sequences[idx]
         k = self.k
-        # 将文本转换为词向量序列
         k_mers = [seq[i:i + k] for i in range(len(seq) - k + 1)]
         seq_vectors = np.array([self.word_vectors[word] for word in k_mers], dtype=np.float32)
         seq_vectors = torch.tensor(seq_vectors, dtype=torch.float32)
@@ -172,7 +192,7 @@ class BERTDataset(Dataset):
         # 生成分段ID：Five UTR=0, CDS=1, Three UTR=2
         segment_ids = []
         segment_ids += [1] * (five_len - 1)  # Five UTR的k-mer数量
-        segment_ids += [2] * (cds_len)  # CDS的k-mer数量
+        segment_ids += [2] * cds_len  # CDS的k-mer数量
         segment_ids += [3] * (three_len - 1)  # Three UTR的k-mer数量
 
         # 直接返回未填充的数据

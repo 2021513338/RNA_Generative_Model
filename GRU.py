@@ -8,16 +8,28 @@ import numpy as np
 
 
 class GRUModel(nn.Module):
-    def __init__(self, word_vec_size=128, hidden_size=768, num_layers=3, bidirectional=True, num_classes=2):
+    def __init__(self, word_vec_size=128, hidden_size=768, num_layers=3, bottleneck=256, bidirectional=True, num_classes=2):
         super(GRUModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bidirectional = bidirectional
         self.num_classes = num_classes
-
+        factor = 2 if bidirectional else 1
         # 分段嵌入
         self.segment_embed = nn.Embedding(3, 16)
         # 正则化和归一化可以引入
+        # 稀疏编码
+        self.compression = nn.Sequential(
+            nn.Linear(word_vec_size, bottleneck),  # 降维至瓶颈大小
+            nn.ReLU(),
+            nn.LayerNorm(bottleneck)
+        )
+        self.selection = nn.Sequential(
+            nn.Linear(bottleneck, word_vec_size // 2),
+            nn.GELU(),
+            nn.Linear(word_vec_size // 2, word_vec_size),
+            nn.Sigmoid()
+        )
         # GRU编码器
         self.gru = nn.GRU(
             input_size=word_vec_size + 16,
@@ -28,16 +40,14 @@ class GRUModel(nn.Module):
             dropout=0.1
         )
 
-        # 注意力机制可以改进
-        factor = 2 if bidirectional else 1
-        self.attention = nn.Sequential(  # 改为多层注意力
+        # 注意力机制改为多层注意力
+        self.attention = nn.Sequential(
             nn.Linear(hidden_size * factor, hidden_size // 2),
             nn.Tanh(),
             nn.Dropout(0.1),
             nn.Linear(hidden_size // 2, 1)
         )
         # 分类输出层
-        # 分类器可以加强
         if num_classes > 0:
             self.classifier = nn.Sequential(
                 nn.Linear(hidden_size * factor, hidden_size),
@@ -49,7 +59,6 @@ class GRUModel(nn.Module):
                 nn.Dropout(0.1),
                 nn.Linear(hidden_size // 2, num_classes)
             )
-
         # 初始化权重
         self.init_weights()
 
@@ -79,10 +88,21 @@ class GRUModel(nn.Module):
                 if self.classifier.bias is not None:
                     init.zeros_(self.classifier.bias)
 
+        # 初始化压缩层和选择层
+        for layer in [self.compression, self.selection]:
+            if isinstance(layer, nn.Linear):
+                init.xavier_uniform_(layer.weight)
+                if layer.bias is not None:
+                    init.zeros_(layer.bias)
+
     def forward(self, word_embeds, segment_ids, task_type="classification"):
+        # 稀疏编码
+        compressed = self.compression(word_embeds.mean(dim=1))  # [batch, bottleneck]
+        scores = torch.sigmoid(self.selection(compressed))  # [batch, features]
+        sparse_embeds = word_embeds * scores.unsqueeze(1)
         # 分段嵌入
         seg_emb = self.segment_embed(segment_ids)
-        combined = torch.cat([word_embeds, seg_emb], dim=-1)
+        combined = torch.cat([sparse_embeds, seg_emb], dim=-1)
         # GRU编码
         output, _ = self.gru(combined)
         # 注意力池化

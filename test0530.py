@@ -31,8 +31,9 @@ def collate_classification(batch):
         'label': labels,
     }
 
-def train_gru_classification(CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, labels, k, word_vectors_path, epochs,
-                         num_classes=2, resume_from_checkpoint=None):
+def train_gru_classification(CDS_sequences, Five_UTR_sequences, Three_UTR_sequences, labels, k, word_vectors_path,
+                             epochs, num_classes=2, resume_from_checkpoint=None):
+
     batch_size = 16
     model_path = "result/best_gru_cls.pth"  # 修改模型保存名称
     result_save_path = f"result/GRU_cls_ep{epochs}.txt"
@@ -198,4 +199,4 @@ Three_UTR_sequences = df[utr_3_colum]
 labels = df[label_colum]
 train_gru_classification(CDS_sequences, Five_UTR_sequences, Three_UTR_sequences,
                      labels, k=3, word_vectors_path='result/word_vectors.model',
-                     epochs=200, num_classes=2)
+                     epochs=200, num_classes=2, resume_from_checkpoint="result/checkpoint_gru_epoch_80.pth")
